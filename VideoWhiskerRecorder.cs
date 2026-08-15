@@ -1,197 +1,308 @@
-using System.Collections.Generic;
-using System.IO;
-using UnityEngine;
 using System;
-using UnityEngine.Rendering.Universal;
+using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
+using System.Text;
+using UnityEngine;
+using UnityEngine.Rendering.Universal;
 
-public class VideoWhiskerRecorder : MonoBehaviour {
+public class VideoWhiskerRecorder : MonoBehaviour
+{
+    public const string RightImageFileName = "frame_right_0000.png";
+    public const string TactileFileName = "whiskers.csv";
+
     public Camera rightEyeCamera;
-    public Camera leftEyeCamera;
 
-    public int captureW = 256;  
+    public int captureW = 256;
     public int captureH = 256;
-    public int outW     = 64;   
-    public int outH     = 64;
-    RenderTexture hiRT;
-    Texture2D outTex;
+    public int outW = 64;
+    public int outH = 64;
+    public int frameCap = WhiskerManager.SourceFrameCount;
 
     public WhiskerManager whiskerManager;
 
-    private int currentFrame = 0;
-    private bool isRecording = false;
+    private RenderTexture hiRT;
+    private Texture2D outTex;
+    private StreamWriter tactileWriter;
+
+    private readonly List<string> whiskerNames =
+        new List<string>(WhiskerManager.RightWhiskerCount);
+    private readonly Dictionary<string, Whisker> whiskerMap =
+        new Dictionary<string, Whisker>(WhiskerManager.RightWhiskerCount);
+
+    private int currentFrame;
+    private bool isRecording;
+    private bool manuallyDriven;
+    private bool imageCaptured;
     private string savePath;
-    public int frameCap = 51;
 
     public bool IsRecording => isRecording;
     public int CurrentFrame => currentFrame;
 
-    private List<string> whiskerNames = new List<string>();
-    private Dictionary<string, List<string>> whiskerContactsPerTrial = new Dictionary<string, List<string>>();
-
-    void LateUpdate() {
-
-        var allWhiskers = FindObjectsOfType<Whisker>();
-        
-        if (!isRecording || currentFrame >= frameCap) {
-            if (isRecording) {
-                StopRecording();
-            }
-            return;
-        }
-
-        if (whiskerNames == null || whiskerNames.Count == 0) {
-            Debug.LogWarning("[Recorder] Skipping frame: whiskerNames not loaded.");
-            return;
-        }
-
-        // saving images from mouse pov
-        if (currentFrame == 0) {
-            string leftPath  = System.IO.Path.Combine(savePath, $"frame_left_0000.png");
-            string rightPath = System.IO.Path.Combine(savePath, $"frame_right_0000.png");
-            CaptureEyeAndSave(leftEyeCamera,  leftPath);
-            CaptureEyeAndSave(rightEyeCamera, rightPath);
-            currentFrame++;
-
-            // Reset
-            RenderTexture.active = null;
-            rightEyeCamera.targetTexture = null;
-            leftEyeCamera.targetTexture = null;
-
-        }
-
-        // logging whisker contact csv files
-        Dictionary<string, Whisker> whiskerMap = new Dictionary<string, Whisker>();
-        foreach (var whisker in allWhiskers)
-            whiskerMap[whisker.name] = whisker;
-
-        foreach (string whiskerName in whiskerNames) {
-            // string line = "0,0,0,0"; 
-            string line = $"0,0"; 
-            if (whiskerMap.TryGetValue(whiskerName, out Whisker w) && w != null) {
-                bool contact = w.HasContact();
-                // Vector3 pt = contact ? w.GetLastContactPoint() : Vector3.zero;
-                // line = $"{(contact ? 1 : 0)},{pt.x},{pt.y},{pt.z}";
-
-                float s = contact ? w.SContact : 0f;
-                float theta = w.thetaWDeg;
-                
-                line = $"{s.ToString("F4", CultureInfo.InvariantCulture)},{theta:F4}";
-            }
-
-            if (!whiskerContactsPerTrial.ContainsKey(whiskerName))
-                whiskerContactsPerTrial[whiskerName] = new List<string>();
-            whiskerContactsPerTrial[whiskerName].Add(line);
-        }
-
-        foreach (var w in allWhiskers)
-            w.ResetContactInfo();
-
-        currentFrame++;
-
+    void LateUpdate()
+    {
+        if (isRecording && !manuallyDriven)
+            CaptureFrame();
     }
 
-    public void SetOutputPath(string path) {
-        savePath = path;
+    public void SetOutputPath(string path)
+    {
+        savePath = Path.GetFullPath(path);
+    }
+
+    public bool StartRecording(bool manualCapture = false)
+    {
+        if (isRecording)
+        {
+            Debug.LogError("[Recorder] A recording is already active.");
+            return false;
+        }
+
+        if (rightEyeCamera == null || whiskerManager == null)
+        {
+            Debug.LogError(
+                "[Recorder] RightEyeCamera and WhiskerManager references are required."
+            );
+            return false;
+        }
+
+        if (!whiskerManager.IsReady ||
+            whiskerManager.whiskerNames.Count != WhiskerManager.RightWhiskerCount)
+        {
+            Debug.LogError(
+                $"[Recorder] Expected a ready {WhiskerManager.RightWhiskerCount}-whisker " +
+                "right-only rig."
+            );
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(savePath))
+        {
+            Debug.LogError("[Recorder] Output path is not set.");
+            return false;
+        }
+
         Directory.CreateDirectory(savePath);
+        EnsureCaptureBuffers();
+        ConfigureRightEye();
+
+        whiskerNames.Clear();
+        whiskerNames.AddRange(whiskerManager.whiskerNames);
+        whiskerMap.Clear();
+
+        foreach (Whisker whisker in FindObjectsByType<Whisker>(FindObjectsSortMode.None))
+        {
+            if (!whisker.name.StartsWith("R", StringComparison.Ordinal))
+                continue;
+
+            whisker.eyeCamera = rightEyeCamera;
+            whisker.targetPixelHeight = outH;
+            whiskerMap[whisker.name] = whisker;
+        }
+
+        foreach (string whiskerName in whiskerNames)
+        {
+            if (!whiskerMap.ContainsKey(whiskerName))
+            {
+                Debug.LogError($"[Recorder] Missing right whisker {whiskerName}.");
+                return false;
+            }
+        }
+
+        string tactilePath = Path.Combine(savePath, TactileFileName);
+        tactileWriter = new StreamWriter(
+            tactilePath,
+            false,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            bufferSize: 16 * 1024
+        );
+
+        currentFrame = 0;
+        manuallyDriven = manualCapture;
+        imageCaptured = false;
+        isRecording = true;
+        return true;
     }
 
-    public void StartRecording() {
-        whiskerContactsPerTrial.Clear();
+    private void EnsureCaptureBuffers()
+    {
+        if (hiRT == null ||
+            hiRT.width != captureW ||
+            hiRT.height != captureH)
+        {
+            ReleaseRenderTexture();
 
-        if (isRecording) return;
-
-        if (hiRT == null) {
-            int samples = Mathf.Max(1, QualitySettings.antiAliasing); 
-            hiRT = new RenderTexture(captureW, captureH, 24, RenderTextureFormat.ARGB32) {
+            int samples = Mathf.Max(1, QualitySettings.antiAliasing);
+            hiRT = new RenderTexture(
+                captureW,
+                captureH,
+                24,
+                RenderTextureFormat.ARGB32
+            )
+            {
                 antiAliasing = samples,
-                filterMode   = FilterMode.Bilinear
+                filterMode = FilterMode.Bilinear
             };
             hiRT.Create();
         }
-        if (outTex == null) {
+
+        if (outTex == null || outTex.width != outW || outTex.height != outH)
+        {
+            if (outTex != null)
+                Destroy(outTex);
             outTex = new Texture2D(outW, outH, TextureFormat.RGB24, false);
         }
+    }
 
-        float aspect = (float)captureW / (float)captureH;
+    private void ConfigureRightEye()
+    {
+        float aspect = (float)captureW / Mathf.Max(1, captureH);
         rightEyeCamera.aspect = aspect;
-        leftEyeCamera.aspect  = aspect;
 
-        float perEyeHorizontalFov = 140f; 
-        float vfov = Camera.HorizontalToVerticalFieldOfView(perEyeHorizontalFov, aspect);
-        rightEyeCamera.fieldOfView = vfov;
-        leftEyeCamera.fieldOfView  = vfov;
-
+        float verticalFov = Camera.HorizontalToVerticalFieldOfView(140f, aspect);
+        rightEyeCamera.fieldOfView = verticalFov;
         rightEyeCamera.allowMSAA = true;
-        leftEyeCamera.allowMSAA  = true;
-        
-        ConfigureEye(rightEyeCamera);
-        ConfigureEye(leftEyeCamera);
 
-        foreach (var w in FindObjectsOfType<Whisker>()) {
-            w.targetPixelHeight = outH; 
-            if (w.name.StartsWith("R"))      w.eyeCamera = rightEyeCamera;
-            else if (w.name.StartsWith("L")) w.eyeCamera = leftEyeCamera;
-            else                             w.eyeCamera = rightEyeCamera; 
-        }
+        rightEyeCamera.forceIntoRenderTexture = true;
+        rightEyeCamera.enabled = false;
 
-        isRecording = true;
-        currentFrame = 0; 
-
-        if (whiskerManager != null && (whiskerNames == null || whiskerNames.Count == 0)) {
-            whiskerNames = whiskerManager.whiskerNames;
-            Debug.Log($"[Recorder] Loaded {whiskerNames.Count} whisker names.");
-        }
-    }
-
-    private void CaptureEyeAndSave(Camera eyeCam, string filePath) {
-        eyeCam.targetTexture = hiRT;
-        eyeCam.Render();                      
-
-        RenderTexture tmp = RenderTexture.GetTemporary(outW, outH, 0, RenderTextureFormat.ARGB32);
-        Graphics.Blit(hiRT, tmp);            
-
-        RenderTexture.active = tmp;
-        outTex.ReadPixels(new Rect(0,0,outW,outH), 0, 0);
-        outTex.Apply();
-
-        eyeCam.targetTexture = null;
-        RenderTexture.active = null;
-        RenderTexture.ReleaseTemporary(tmp);
-
-        System.IO.File.WriteAllBytes(filePath, outTex.EncodeToPNG());
-    }
-
-    private void ConfigureEye(Camera cam) {
-        cam.forceIntoRenderTexture = true;
-        cam.stereoTargetEye = StereoTargetEyeMask.None;
-        cam.enabled = false; 
-
-        var urp = cam.GetUniversalAdditionalCameraData();
+        UniversalAdditionalCameraData urp = rightEyeCamera.GetUniversalAdditionalCameraData();
         urp.renderPostProcessing = false;
-        urp.antialiasing = AntialiasingMode.None; 
-        urp.SetRenderer(0);                      
-        urp.cameraStack.Clear();            
+        urp.antialiasing = AntialiasingMode.None;
+        urp.SetRenderer(0);
+        urp.cameraStack.Clear();
 
-        // Don't render UI from this camera
         int uiLayer = LayerMask.NameToLayer("UI");
-        if (uiLayer >= 0) cam.cullingMask &= ~(1 << uiLayer);
+        if (uiLayer >= 0)
+            rightEyeCamera.cullingMask &= ~(1 << uiLayer);
     }
 
-    public void StopRecording() {
-        
-        if (!isRecording) return;
+    public void ResetContacts()
+    {
+        foreach (Whisker whisker in whiskerMap.Values)
+        {
+            if (whisker != null)
+                whisker.ResetContactInfo();
+        }
+    }
 
-        Debug.Log($"StopRecording called at currentFrame={currentFrame}, dictCount={whiskerContactsPerTrial.Count}");
+    /// <summary>
+    /// Writes one frame-major block of 30 ordered (s, theta_deg) rows.
+    /// The right-eye image is rendered once, at the first source pose.
+    /// </summary>
+    public bool CaptureFrame()
+    {
+        if (!isRecording || tactileWriter == null)
+            return false;
+
+        if (currentFrame >= frameCap)
+        {
+            StopRecording();
+            return false;
+        }
+
+        if (!imageCaptured)
+        {
+            string imagePath = Path.Combine(savePath, RightImageFileName);
+            if (!CaptureRightEyeAndSave(imagePath))
+            {
+                StopRecording();
+                return false;
+            }
+            imageCaptured = true;
+        }
+
+        foreach (string whiskerName in whiskerNames)
+        {
+            Whisker whisker = whiskerMap[whiskerName];
+            float s = whisker.HasContact() ? whisker.SContact : 0f;
+            float theta = whisker.thetaWDeg;
+
+            tactileWriter.Write(s.ToString("F4", CultureInfo.InvariantCulture));
+            tactileWriter.Write(',');
+            tactileWriter.WriteLine(theta.ToString("F4", CultureInfo.InvariantCulture));
+        }
+
+        ResetContacts();
+        currentFrame++;
+
+        if (currentFrame >= frameCap)
+            StopRecording();
+
+        return true;
+    }
+
+    private bool CaptureRightEyeAndSave(string filePath)
+    {
+        RenderTexture previousActive = RenderTexture.active;
+        RenderTexture previousTarget = rightEyeCamera.targetTexture;
+        RenderTexture downsampled = null;
+
+        try
+        {
+            rightEyeCamera.targetTexture = hiRT;
+            rightEyeCamera.Render();
+
+            downsampled = RenderTexture.GetTemporary(
+                outW,
+                outH,
+                0,
+                RenderTextureFormat.ARGB32
+            );
+            Graphics.Blit(hiRT, downsampled);
+
+            RenderTexture.active = downsampled;
+            outTex.ReadPixels(new Rect(0, 0, outW, outH), 0, 0);
+            outTex.Apply();
+            File.WriteAllBytes(filePath, outTex.EncodeToPNG());
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError($"[Recorder] Failed to write {filePath}: {exception}");
+            return false;
+        }
+        finally
+        {
+            rightEyeCamera.targetTexture = previousTarget;
+            RenderTexture.active = previousActive;
+            if (downsampled != null)
+                RenderTexture.ReleaseTemporary(downsampled);
+        }
+    }
+
+    public void StopRecording()
+    {
+        if (!isRecording && tactileWriter == null)
+            return;
 
         isRecording = false;
+        manuallyDriven = false;
 
-        foreach (var kvp in whiskerContactsPerTrial) {
-            string whiskerName = kvp.Key;
-            string whiskerFile = Path.Combine(savePath, $"{whiskerName}.csv");
-            File.WriteAllLines(whiskerFile, kvp.Value);
-        }
-
+        tactileWriter?.Flush();
+        tactileWriter?.Dispose();
+        tactileWriter = null;
     }
 
+    private void ReleaseRenderTexture()
+    {
+        if (hiRT == null)
+            return;
+
+        hiRT.Release();
+        Destroy(hiRT);
+        hiRT = null;
+    }
+
+    void OnDestroy()
+    {
+        StopRecording();
+        ReleaseRenderTexture();
+
+        if (outTex != null)
+        {
+            Destroy(outTex);
+            outTex = null;
+        }
+    }
 }
