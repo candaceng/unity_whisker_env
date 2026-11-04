@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6a4a5b22d530f8b4dac101ac8d85f900, type: 3}
+  m_Name: Eval6CondProfile
+  m_EditorClassIdentifier:
+  outputDir: Data/eval6cond_right_v3
+  repeatsPerCond: 1
+  preHold: 0.2
+  postHold: 0.2
+  maxFrames: 51
+  labels:
+  - concave_near
+  - concave_med
+  - concave_far
+  - convex_near
+  - convex_med
+  - convex_far
