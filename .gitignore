@@ -1,0 +1,40 @@
+# Unity-generated directories
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# IDE and operating-system files
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.sln
+*.suo
+*.user
+*.tmp
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+.DS_Store
+Thumbs.db
+
+# Generated datasets and local tooling
+/Data/
+/Assets/RecordedTrials/
+/Assets/RecordedTrials.meta
+/Assets/launch_debug.txt
+/.codex_staging/
+/tmp/
+**/__pycache__/
+*.py[cod]
+*.log
